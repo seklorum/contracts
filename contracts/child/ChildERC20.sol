@@ -1,95 +1,145 @@
-pragma solidity ^0.5.2;
+pragma solidity ^0.4.24;
 
-import {ERC20Detailed} from "./ERC20Detailed.sol";
-import {ERC20} from "openzeppelin-solidity/contracts/token/ERC20/ERC20.sol";
+import { ERC20 } from "openzeppelin-solidity/contracts/token/ERC20/ERC20.sol";
+import { ERC20Detailed } from "openzeppelin-solidity/contracts/token/ERC20/ERC20Detailed.sol";
 
-import {StateSyncerVerifier} from "./bor/StateSyncerVerifier.sol";
-import {StateReceiver} from "./bor/StateReceiver.sol";
-import "./BaseERC20.sol";
-import "./misc/IParentToken.sol";
+import "./ChildToken.sol";
+import "./IParentToken.sol";
 
-contract ChildERC20 is BaseERC20, ERC20, ERC20Detailed, StateSyncerVerifier, StateReceiver {
-    constructor(
-        address /* ignoring parent owner, use contract owner instead */,
-        address _token,
-        string memory _name,
-        string memory _symbol,
-        uint8 _decimals
-    ) public ERC20Detailed(_name, _symbol, _decimals) {
-        require(_token != address(0x0));
-        token = _token;
-    }
 
-    /**
+contract ChildERC20 is ChildToken, ERC20, ERC20Detailed {
+  event LogTransfer(
+    address indexed token,
+    address indexed from,
+    address indexed to,
+    uint256 amountOrTokenId,
+    uint256 input1,
+    uint256 input2,
+    uint256 output1,
+    uint256 output2
+  );
+  // constructor
+  constructor (address _owner, address _token, string _name, string _symbol, uint8 _decimals)
+    public
+    ERC20Detailed(_name, _symbol, _decimals) {
+    require(_token != address(0x0) && _owner != address(0x0));
+    parentOwner = _owner;
+    token = _token;
+  }
+
+  function setParent(address _parent) public isParentOwner {
+    require(_parent != address(0x0));
+    parent = _parent;
+  }
+
+  /**
    * Deposit tokens
    *
    * @param user address for address
    * @param amount token balance
    */
-    function deposit(address user, uint256 amount) public onlyChildChain {
-        // check for amount and user
-        require(amount > 0 && user != address(0x0));
+  function deposit(address user, uint256 amount) public onlyOwner {
+    // check for amount and user
+    require(amount > 0 && user != address(0x0));
 
-        // input balance
-        uint256 input1 = balanceOf(user);
+    // input balance
+    uint256 input1 = balanceOf(user);
 
-        // increase balance
-        _mint(user, amount);
+    // increase balance
+    _mint(user, amount);
 
-        // deposit events
-        emit Deposit(token, user, amount, input1, balanceOf(user));
-    }
+    // deposit events
+    emit Deposit(token, user, amount, input1, balanceOf(user));
+  }
 
-    /**
+  /**
    * Withdraw tokens
    *
    * @param amount tokens
    */
-    function withdraw(uint256 amount) public payable {
-        _withdraw(msg.sender, amount);
-    }
+  function withdraw(uint256 amount) public {
+    address user = msg.sender;
+    // input balance
+    uint256 input = balanceOf(user);
 
-    function onStateReceive(
-        uint256, /* id */
-        bytes calldata data
-    ) external onlyStateSyncer {
-        (address user, uint256 burnAmount) = abi.decode(data, (address, uint256));
-        uint256 balance = balanceOf(user);
-        if (balance < burnAmount) {
-            burnAmount = balance;
-        }
-        _withdraw(user, burnAmount);
-    }
+    // check for amount
+    require(amount > 0 && input >= amount);
 
-    function _withdraw(address user, uint256 amount) internal {
-        uint256 input = balanceOf(user);
-        _burn(user, amount);
-        emit Withdraw(token, user, amount, input, balanceOf(user));
-    }
+    // decrease balance
+    _burn(user, amount);
 
-    /// @dev Function that is called when a user or another contract wants to transfer funds.
-    /// @param to Address of token receiver.
-    /// @param value Number of tokens to transfer.
-    /// @return Returns success of function call.
-    function transfer(address to, uint256 value) public returns (bool) {
-        if (
-            parent != address(0x0) &&
-            !IParentToken(parent).beforeTransfer(msg.sender, to, value)
-        ) {
-            return false;
-        }
-        return _transferFrom(msg.sender, to, value);
-    }
+    // withdraw event
+    emit Withdraw(token, user, amount, input, balanceOf(user));
+  }
 
-    function allowance(address, address) public view returns (uint256) {
-        revert("Disabled feature");
+  /// @dev Function that is called when a user or another contract wants to transfer funds.
+  /// @param to Address of token receiver.
+  /// @param value Number of tokens to transfer.
+  /// @return Returns success of function call.
+  function transfer(address to, uint256 value) public returns (bool) {
+    if (parent != address(0x0) && !IParentToken(parent).beforeTransfer(msg.sender, to, value)) {
+      return false;
     }
+    uint256 input1 = balanceOf(msg.sender);
+    uint256 input2 = balanceOf(to);
 
-    function approve(address, uint256) public returns (bool) {
-        revert("Disabled feature");
-    }
+    // actual transfer
+    bool result = super.transfer(to, value);
 
-    function transferFrom(address, address, uint256) public returns (bool) {
-        revert("Disabled feature");
-    }
+    // log balance
+    emit LogTransfer(
+      token,
+      msg.sender,
+      to,
+      value,
+      input1,
+      input2,
+      balanceOf(msg.sender),
+      balanceOf(to)
+    );
+
+    return result;
+  }
+
+  function transferWithSig(bytes memory sig, uint256 amount, bytes32 data, address to) public returns (address) {
+    require(amount > 0);
+
+    bytes32 dataHash = keccak256(abi.encodePacked(address(this), amount, data, msg.sender));
+    require(disabledHashes[dataHash] == false, "Sig deactivated");
+    disabledHashes[dataHash] = true;
+
+    dataHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", dataHash));
+    // recover address and send tokens
+    address from = dataHash.ecrecovery(sig);
+    _transfer(from, to, amount);
+
+    return from;
+  }
+
+  /// @dev Allows allowed third party to transfer tokens from one address to another. Returns success.
+  /// @param from Address from where tokens are withdrawn.
+  /// @param to Address to where tokens are sent.
+  /// @param value Number of tokens to transfer.
+  /// @return Returns success of function call.
+  function transferFrom(address from, address to, uint256 value) public returns (bool) {
+    uint256 input1 = balanceOf(from);
+    uint256 input2 = balanceOf(to);
+
+    // actual transfer
+    bool result = super.transferFrom(from, to, value);
+
+    // log balance
+    emit LogTransfer(
+      token,
+      from,
+      to,
+      value,
+      input1,
+      input2,
+      balanceOf(from),
+      balanceOf(to)
+    );
+
+    return result;
+  }
 }

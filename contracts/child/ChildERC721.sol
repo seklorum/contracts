@@ -1,137 +1,121 @@
-pragma solidity ^0.5.2;
+pragma solidity ^0.4.24;
 
-import {ERC721Full} from "openzeppelin-solidity/contracts/token/ERC721/ERC721Full.sol";
-
+import "./ERC721.sol";
 import "./ChildToken.sol";
-import "./misc/IParentToken.sol";
+import "./IParentToken.sol";
 
-import {StateSyncerVerifier} from "./bor/StateSyncerVerifier.sol";
-import {StateReceiver} from "./bor/StateReceiver.sol";
 
-contract ChildERC721 is ChildToken, ERC721Full, StateSyncerVerifier, StateReceiver {
-    event Deposit(address indexed token, address indexed from, uint256 tokenId);
+contract ChildERC721 is ChildToken, ERC721 {
 
-    event Withdraw(
-        address indexed token,
-        address indexed from,
-        uint256 tokenId
-    );
+  event LogTransfer(
+    address indexed token,
+    address indexed from,
+    address indexed to,
+    uint256 amountOrTokenId
+  );
 
-    event LogTransfer(
-        address indexed token,
-        address indexed from,
-        address indexed to,
-        uint256 tokenId
-    );
-
-    constructor(
-        address /* ignoring parent owner, use contract owner instead */,
-        address _token,
-        string memory name,
-        string memory symbol
-    ) public ERC721Full(name, symbol) {
-        require(_token != address(0x0));
-        token = _token;
-    }
-
-    function transferWithSig(
-        bytes calldata sig,
-        uint256 tokenId,
-        bytes32 data,
-        uint256 expiration,
-        address to
-    ) external returns (address) {
-        require(
-            expiration == 0 || block.number <= expiration,
-            "Signature is expired"
-        );
-
-        bytes32 dataHash = hashEIP712MessageWithAddress(
-            hashTokenTransferOrder(msg.sender, tokenId, data, expiration),
-            address(this)
-        );
-        require(disabledHashes[dataHash] == false, "Sig deactivated");
-        disabledHashes[dataHash] = true;
-
-        // recover address and send tokens
-        address from = ecrecovery(dataHash, sig);
-        _transferFrom(from, to, tokenId);
-        require(
-            _checkOnERC721Received(from, to, tokenId, ""),
-            "_checkOnERC721Received failed"
-        );
-        return from;
-    }
-
-    function approve(address to, uint256 tokenId) public {
-        revert("Disabled feature");
-    }
-
-    function getApproved(uint256 tokenId)
-        public
-        view
-        returns (address operator)
+  // constructor
+  constructor (address _owner, address _token, string name, string symbol) //ERC721Full(name, symbol)
+    public 
     {
-        revert("Disabled feature");
-    }
+    require(_token != address(0x0) && _owner != address(0x0));
+    parentOwner = _owner;
+    token = _token;
+  }
 
-    function setApprovalForAll(address operator, bool _approved) public {
-        revert("Disabled feature");
-    }
+  function setParent(address _parent) public isParentOwner {
+    require(_parent != address(0x0));
+    parent = _parent;
+  }
 
-    function isApprovedForAll(address owner, address operator)
-        public
-        view
-        returns (bool)
-    {
-        revert("Disabled feature");
-    }
-
-    /**
-   * @notice Deposit tokens
-   * @param user address for deposit
-   * @param tokenId tokenId to mint to user's account
+  /**
+   * Deposit tokens
+   *
+   * @param user address for address
+   * @param tokenId token balance
    */
-    function deposit(address user, uint256 tokenId) public onlyChildChain {
-        require(user != address(0x0));
-        _mint(user, tokenId);
-        emit Deposit(token, user, tokenId);
-    }
+  function deposit(address user, uint256 tokenId) public onlyOwner {
+    // check for amount and user
+    require(user != address(0x0));
+    uint256 input = balanceOf(user);
 
-    /**
-   * @notice Withdraw tokens
-   * @param tokenId tokenId of the token to be withdrawn
+    _mint(user, tokenId);
+
+    // deposit event
+    emit Deposit(token, user, tokenId, input, balanceOf(user));
+  }
+
+  /**
+   * Withdraw tokens
+   *
+   * @param tokenId tokens
    */
-    function withdraw(uint256 tokenId) public payable {
-        require(ownerOf(tokenId) == msg.sender);
-        _burn(msg.sender, tokenId);
-        emit Withdraw(token, msg.sender, tokenId);
-    }
+  function withdraw(uint256 tokenId) public {
+    require(ownerOf(tokenId) == msg.sender);
 
-    function onStateReceive(
-        uint256, /* id */
-        bytes calldata data
-    ) external onlyStateSyncer {
-        (address user, uint256 tokenId) = abi.decode(data, (address, uint256));
-        _burn(user, tokenId);
-        emit Withdraw(token, user, tokenId);
-    }
+    address user = msg.sender;
+    uint256 input1 = balanceOf(user);
 
+    _burn(user, tokenId);
+
+    // withdraw event
+    emit Withdraw(token, user, tokenId, input1, balanceOf(user));
+  }
     /**
-   * @dev Overriding the inherited method so that it emits LogTransfer
-   */
-    function transferFrom(address from, address to, uint256 tokenId) public {
-        if (
-            parent != address(0x0) &&
-            !IParentToken(parent).beforeTransfer(msg.sender, to, tokenId)
-        ) {
-            return;
-        }
-        _transferFrom(from, to, tokenId);
-    }
+    * @dev Internal function to transfer ownership of a given token ID to another address.
+    * As opposed to transferFrom, this imposes no restrictions on msg.sender.
+    * @param from current owner of the token
+    * @param to address to receive the ownership of the given token ID
+    * @param tokenId uint256 ID of the token to be transferred
+    */
+  function _transferFrom(address from, address to, uint256 tokenId) internal {
+    // require(_isApprovedOrOwner(from/msg.sender, tokenId));
+    require(ownerOf(tokenId) == from);
+    require(to != address(0));
 
-    function _transferFrom(address from, address to, uint256 tokenId) internal {
-        super._transferFrom(from, to, tokenId);
-        emit LogTransfer(token, from, to, tokenId);
+    _clearApproval(from, tokenId);
+    _removeTokenFrom(from, tokenId);
+    _addTokenTo(to, tokenId);
+
+    emit Transfer(from, to, tokenId);
+  }
+
+  function transferWithSig(bytes memory sig, uint256 tokenId, bytes32 data, address to) public returns (address) {
+    bytes32 dataHash = keccak256(abi.encodePacked(address(this), tokenId, data, msg.sender));
+    require(disabledHashes[dataHash] == false, "Sig deactivated");
+    disabledHashes[dataHash] = true;
+
+    dataHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", dataHash));
+    // recover address and send tokens
+    address from = dataHash.ecrecovery(sig);
+
+    _transferFrom(from, to, tokenId);
+
+    return from;
+  }
+
+  // safeTransferFrom
+  function safeTransferWithSig(bytes memory sig, uint256 tokenId, bytes32 data, address to) public returns (address) {
+    address from = transferWithSig(sig, tokenId, data, to);
+
+    require(_checkOnERC721Received(from, to, tokenId, ""));
+    return from;
+  }
+
+  function transferFrom(address from, address to, uint256 tokenId) public {
+    if (parent != address(0x0) && !IParentToken(parent).beforeTransfer(msg.sender, to, tokenId)) {
+      return;
     }
+    // actual transfer
+    super.transferFrom(from, to, tokenId);
+
+    // log balance
+    emit LogTransfer(
+      token,
+      from,
+      to,
+      tokenId
+    );
+  }
+
 }
