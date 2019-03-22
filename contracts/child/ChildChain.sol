@@ -1,171 +1,158 @@
-pragma solidity ^0.5.2;
+pragma solidity ^0.4.24;
 
-import {Ownable} from "openzeppelin-solidity/contracts/ownership/Ownable.sol";
-
-import {StateSyncerVerifier} from "./bor/StateSyncerVerifier.sol";
-import {StateReceiver} from "./bor/StateReceiver.sol";
+import "openzeppelin-solidity/contracts/ownership/Ownable.sol";
+import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 
 import "./ChildToken.sol";
 import "./ChildERC20.sol";
 import "./ChildERC721.sol";
 
-contract ChildChain is Ownable, StateSyncerVerifier, StateReceiver {
-    // mapping for (root token => child token)
-    mapping(address => address) public tokens;
-    mapping(address => bool) public isERC721;
-    mapping(uint256 => bool) public deposits;
-    mapping(uint256 => bool) public withdraws;
 
-    event NewToken(
-        address indexed rootToken,
-        address indexed token,
-        uint8 _decimals
-    );
+contract ChildChain is Ownable {
+  using SafeMath for uint256;
 
-    event TokenDeposited(
-        address indexed rootToken,
-        address indexed childToken,
-        address indexed user,
-        uint256 amount,
-        uint256 depositCount
-    );
+  //
+  // Storage
+  //
 
-    event TokenWithdrawn(
-        address indexed rootToken,
-        address indexed childToken,
-        address indexed user,
-        uint256 amount,
-        uint256 withrawCount
-    );
+  // mapping for (root token => child token)
+  mapping(address => address) public tokens;
 
-    constructor() public {
-        //Mapping matic Token
-        tokens[0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0] = 0x0000000000000000000000000000000000001010;
+  // weather contract is erc721 or not
+  mapping(address => bool) public isERC721;
+
+  // deposit mapping
+  mapping(uint256 => bool) public deposits;
+
+  // withdraw mapping
+  mapping(uint256 => bool) public withdraws;
+
+  //
+  // Events
+  //
+  event NewToken(
+    address indexed rootToken,
+    address indexed token,
+    uint8 _decimals
+  );
+
+  event TokenDeposited(
+    address indexed rootToken,
+    address indexed childToken,
+    address indexed user,
+    uint256 amount,
+    uint256 depositCount
+  );
+
+  event TokenWithdrawn(
+    address indexed rootToken,
+    address indexed childToken,
+    address indexed user,
+    uint256 amount,
+    uint256 withrawCount
+  );
+
+  constructor () public {
+
+  }
+
+  function addToken(
+    address _owner,
+    address _rootToken,
+    string _name,
+    string _symbol,
+    uint8 _decimals,
+    bool _isERC721
+  ) public onlyOwner returns (address token) {
+    // check if root token already exists
+    require(tokens[_rootToken] == address(0x0));
+
+    // create new token contract
+    if (_isERC721) {
+      token = new ChildERC721(_owner, _rootToken, _name, _symbol);
+      isERC721[_rootToken] = true;
+    } else {
+      token = new ChildERC20(_owner, _rootToken, _name, _symbol, _decimals);
     }
 
-    function onStateReceive(
-        uint256, /* id */
-        bytes calldata data
-    ) external onlyStateSyncer {
-        (address user, address rootToken, uint256 amountOrTokenId, uint256 depositId) = abi
-            .decode(data, (address, address, uint256, uint256));
-        depositTokens(rootToken, user, amountOrTokenId, depositId);
+    // add mapping with root token
+    tokens[_rootToken] = token;
+
+    // broadcast new token's event
+    emit NewToken(_rootToken, token, _decimals);
+  }
+
+  function mapToken(address _rootToken, address _token,bool _isERC721) public {
+    // add mapping with root token
+    tokens[_rootToken] = _token;
+    isERC721[_rootToken] = _isERC721;
+
+    // broadcast new token's event
+    // emit NewToken(_rootToken, _token, childERC20s(_token).decimals);
+  }
+ 
+  function depositTokens(
+    address rootToken,
+    address user,
+    uint256 amountOrTokenId,
+    uint256 depositCount
+  ) public onlyOwner {
+    // check if deposit happens only once
+    require(deposits[depositCount] == false);
+
+    // set deposit flag
+    deposits[depositCount] = true;
+
+    // retrieve child tokens
+    address childToken = tokens[rootToken];
+
+    // check if child token is mapped
+    require(childToken != address(0x0));
+    
+    ChildToken obj;
+
+    if (isERC721[rootToken]) {
+      obj = ChildERC721(childToken);
+    } else {
+      obj = ChildERC20(childToken);
     }
 
-    function addToken(
-        address _owner,
-        address _rootToken,
-        string memory _name,
-        string memory _symbol,
-        uint8 _decimals,
-        bool _isERC721
-    ) public onlyOwner returns (address token) {
-        // check if root token already exists
-        require(tokens[_rootToken] == address(0x0), "Token already mapped");
+    // deposit tokens
+    obj.deposit(user, amountOrTokenId);
 
-        // create new token contract
-        if (_isERC721) {
-            token = address(
-                new ChildERC721(_owner, _rootToken, _name, _symbol)
-            );
-            isERC721[_rootToken] = true;
-        } else {
-            token = address(
-                new ChildERC20(_owner, _rootToken, _name, _symbol, _decimals)
-            );
-        }
+    // Emit TokenDeposited event
+    emit TokenDeposited(rootToken, childToken, user, amountOrTokenId, depositCount);
+  }
 
-        // add mapping with root token
-        tokens[_rootToken] = token;
+  function withdrawTokens(
+    address rootToken,
+    address user,
+    uint256 amountOrTokenId,
+    uint256 withdrawCount
+  ) public onlyOwner {
+    // check if withdrawal happens only once
+    require(withdraws[withdrawCount] == false);
 
-        // broadcast new token's event
-        emit NewToken(_rootToken, token, _decimals);
+    // set withdrawal flag
+    withdraws[withdrawCount] = true;
+
+    // retrieve child tokens
+    address childToken = tokens[rootToken];
+
+    // check if child token is mapped
+    require(childToken != address(0x0));
+    
+    ChildToken obj;
+
+    if (isERC721[rootToken]) {
+      obj = ChildERC721(childToken);
+    } else {
+      obj = ChildERC20(childToken);
     }
+    // withdraw tokens
+    obj.withdraw(amountOrTokenId);
 
-    // for testnet updates remove for mainnet
-    function mapToken(address rootToken, address token, bool isErc721)
-        public
-        onlyOwner
-    {
-        tokens[rootToken] = token;
-        isERC721[rootToken] = isErc721;
-    }
-
-    function withdrawTokens(
-        address rootToken,
-        address user,
-        uint256 amountOrTokenId,
-        uint256 withdrawCount
-    ) public onlyOwner {
-        // check if withdrawal happens only once
-        require(withdraws[withdrawCount] == false);
-
-        // set withdrawal flag
-        withdraws[withdrawCount] = true;
-
-        // retrieve child tokens
-        address childToken = tokens[rootToken];
-
-        // check if child token is mapped
-        require(childToken != address(0x0), "child token is not mapped");
-
-        ChildToken obj;
-
-        if (isERC721[rootToken]) {
-            obj = ChildERC721(childToken);
-        } else {
-            obj = ChildERC20(childToken);
-        }
-        // withdraw tokens
-        obj.withdraw(amountOrTokenId);
-
-        // Emit TokenWithdrawn event
-        emit TokenWithdrawn(
-            rootToken,
-            childToken,
-            user,
-            amountOrTokenId,
-            withdrawCount
-        );
-    }
-
-    function depositTokens(
-        address rootToken,
-        address user,
-        uint256 amountOrTokenId,
-        uint256 depositId
-    ) internal {
-        // check if deposit happens only once
-        require(deposits[depositId] == false);
-
-        // set deposit flag
-        deposits[depositId] = true;
-
-        // retrieve child tokens
-        address childToken = tokens[rootToken];
-
-        // check if child token is mapped
-        require(childToken != address(0x0));
-
-        ChildToken obj;
-
-        if (isERC721[rootToken]) {
-            obj = ChildERC721(childToken);
-        } else {
-            obj = ChildERC20(childToken);
-        }
-
-        // deposit tokens
-        obj.deposit(user, amountOrTokenId);
-
-        // Emit TokenDeposited event
-        emit TokenDeposited(
-            rootToken,
-            childToken,
-            user,
-            amountOrTokenId,
-            depositId
-        );
-    }
-
+    // Emit TokenWithdrawn event
+    emit TokenWithdrawn(rootToken, childToken, user, amountOrTokenId, withdrawCount);
+  }
 }
